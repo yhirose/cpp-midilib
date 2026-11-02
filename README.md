@@ -2,9 +2,13 @@
 
 MIDI input for C++17 in one header, for a program that makes sound as it is
 played: the inputs, one opened by its id, and its messages in the order they
-came, each stamped on the clock the audio device keeps.
+came, each stamped on a clock that only goes forward.
 
-macOS (CoreMIDI) only for now.
+| Platform | Through | Link |
+| --- | --- | --- |
+| macOS | CoreMIDI | `-framework CoreMIDI -framework CoreFoundation` |
+| Windows | WinMM | `winmm` |
+| Linux | the ALSA sequencer, loaded from `libasound.so.2` when the first port is asked for (a machine without it, or without `/dev/snd/seq`, has no ports); build with `<alsa/asoundlib.h>` | `-ldl -lpthread` |
 
 ```cpp
 #include <midilib.h>
@@ -30,13 +34,18 @@ double breath = controls.value(0, 2);         // CC 2 with CC 34: 0.0 to 1.0
 ```
 
 - `input_ports()` lists the inputs. An id stays the same while a device is
-  plugged in.
-- `Input` takes the messages on CoreMIDI's thread and keeps them in a queue
-  that needs no lock; `poll()` takes one and `drain()` takes all that came by a
-  time. Read them from one thread. When the queue (4096 messages unless you
-  say otherwise) is full, what comes is dropped and counted by `dropped()`.
-- Times are in ns on the host clock, `now_ns()`, the one CoreAudio stamps its
-  buffers with.
+  plugged in: CoreMIDI's unique id, the device's name on Windows (with
+  ` (2)` and on for a second of the same name), `client:port` on Linux.
+- `Input` takes the messages on the system's MIDI thread (on Linux, a
+  thread of its own) and keeps them in a queue that needs no lock;
+  `poll()` takes one, `drain()` takes all that came by a time, and
+  `wait(timeout)` waits for one. Read them from one thread. When the queue
+  (4096 messages unless you say otherwise) is full, what comes is dropped
+  and counted by `dropped()`.
+- Times are in ns on `now_ns()`'s clock: on macOS the host clock, which
+  CoreAudio stamps its buffers with; QueryPerformanceCounter on Windows;
+  CLOCK_MONOTONIC on Linux. On macOS a message has the time CoreMIDI gives
+  it; on Windows and Linux, the time it came to this process.
 - A `Message` is one channel message (note, pressure, controller, program,
   bend) as it came. A note on at velocity 0 is a note off to `kind()`.
   Messages that came together (a wind controller's legato: the new note on,
@@ -49,10 +58,14 @@ double breath = controls.value(0, 2);         // CC 2 with CC 34: 0.0 to 1.0
 
 ```sh
 cd example
-make            # builds both and runs the test (it needs the CoreMIDI server)
+make            # builds them and runs the tests
 ./example EWI   # prints what the first input named like "EWI" plays
 ./bridge EWI    # passes it on to another program, one line a message
 ```
+
+`test_common` checks what is the same everywhere with no device. On macOS,
+`test` also sends messages through a virtual CoreMIDI source of its own and
+reads them back; it needs the CoreMIDI server (not a sandbox).
 
 ## License
 

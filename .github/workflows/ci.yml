@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test (a virtual CoreMIDI source as the input)
+        run: make -C example
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ALSA's headers (libasound itself is loaded at run time)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Build and test
+        run: make -C example
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build and test (MSVC)
+        shell: cmd
+        working-directory: example
+        run: |
+          cl /nologo /std:c++17 /EHsc /W4 /WX /I.. test_common.cpp winmm.lib || exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX /I.. example.cpp winmm.lib || exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX /I.. bridge.cpp winmm.lib || exit /b 1
+          test_common.exe
