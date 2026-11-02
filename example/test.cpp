@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdio>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <spawn.h>
 #include <string>
@@ -23,6 +24,24 @@ static int failures = 0;
   } while (0)
 
 static MIDIEndpointRef source;
+
+// What `f` throws, or "" when it throws nothing.
+static std::string error_of(const std::function<void()> &f) {
+  try {
+    f();
+    return "";
+  } catch (const midilib::Error &e) { return e.what(); }
+}
+
+// What the test destination has been sent, as UMP words.
+static std::mutex mutex;
+static std::vector<uint32_t> heard;
+
+// A sysex of 14 data bytes, 1 to 14: three packets in UMP.
+static const std::vector<uint8_t> &long_bytes() {
+  static const std::vector<uint8_t> b = {0xF0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0xF7};
+  return b;
+}
 
 static uint32_t ump(uint8_t status, uint8_t d1, uint8_t d2 = 0) {
   return (0x2u << 28) | (uint32_t(status) << 16) | (uint32_t(d1) << 8) | d2;
@@ -233,6 +252,68 @@ int main(int argc, char **argv) {
   send({{0, {ump(0x90, 99, 1)}}});
   got = take(moved, 1);
   CHECK(got.size() == 1 && got[0].note() == 99);
+
+  // An input that asks for sysexes gets each whole, in order among the
+  // channel messages: one in a single packet, and one of 14 data bytes in
+  // three (its start, middle and end).
+  {
+    midilib::Input sx(id, 64, true);
+    wait_for([&] {
+      send({{0, {ump(0xB0, 127, 0)}}});
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      bool any = false;
+      while (sx.poll(m)) { any = true; }
+      return any;
+    });
+    send({{0,
+           {ump(0x90, 68, 1), 0x30047E01u, 0x02030000u, 0x30160102u, 0x03040506u, 0x30260708u, 0x090A0B0Cu,
+            0x30320D0Eu, 0x00000000u, ump(0x90, 69, 1)}}});
+    got = take(sx, 4);
+    CHECK(got.size() == 4 && got[0].note() == 68 && got[3].note() == 69);
+    CHECK(got.size() == 4 && got[1].kind() == midilib::Kind::sysex &&
+          got[1].sysex == (std::vector<uint8_t>{0xF0, 0x7E, 0x01, 0x02, 0x03, 0xF7}));
+    CHECK(got.size() == 4 && got[2].sysex == long_bytes());
+  }
+
+  // An output: a virtual destination is listed by its name, and what is sent
+  // to it comes as UMP of MIDI 1.0, a sysex in packets of six data bytes. An
+  // input's id is no output, and bytes send() refuses send nothing.
+  MIDIEndpointRef dest;
+  CHECK(MIDIDestinationCreateWithProtocol(client, CFSTR("midilib test destination"), kMIDIProtocol_1_0, &dest,
+                                          ^(const MIDIEventList *list, void *) {
+                                            std::lock_guard<std::mutex> lock(mutex);
+                                            auto p = &list->packet[0];
+                                            for (UInt32 i = 0; i < list->numPackets; i++) {
+                                              heard.insert(heard.end(), p->words, p->words + p->wordCount);
+                                              p = MIDIEventPacketNext(p);
+                                            }
+                                          }) == noErr);
+  std::string out_id;
+  wait_for([&] {
+    for (auto &p : midilib::output_ports()) {
+      if (p.name == "midilib test destination") { out_id = p.id; }
+    }
+    return !out_id.empty();
+  });
+  CHECK(!out_id.empty());
+  CHECK(error_of([&] { midilib::Output wrong(id); }) == "midilib: no MIDI output " + id);
+  midilib::Output out(out_id);
+  std::vector<uint8_t> bytes = {0x90, 60, 100};
+  bytes.insert(bytes.end(), long_bytes().begin(), long_bytes().end());
+  bytes.insert(bytes.end(), {0xF0, 0xF7, 0xE0, 0, 0x40});
+  out.send(bytes);
+  std::vector<uint32_t> want = {ump(0x90, 60, 100), 0x30160102u, 0x03040506u, 0x30260708u, 0x090A0B0Cu,
+                                0x30320D0Eu, 0x00000000u,          0x30000000u, 0x00000000u, ump(0xE0, 0, 0x40)};
+  auto heard_now = [&] {
+    std::lock_guard<std::mutex> lock(mutex);
+    return heard;
+  };
+  CHECK(wait_for([&] { return heard_now().size() >= want.size(); }) && heard_now() == want);
+  CHECK(error_of([&] { out.send({0x90, 61, 1, 0xB0, 7}); }) == "midilib: the message at byte 3 is cut short");
+  out.send({0x90, 62, 1});
+  want.push_back(ump(0x90, 62, 1));
+  CHECK(wait_for([&] { return heard_now().size() >= want.size(); }) && heard_now() == want);
+  MIDIEndpointDispose(dest);
 
   MIDIEndpointDispose(source);
   if (failures) { return 1; }
