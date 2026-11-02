@@ -39,6 +39,7 @@
 #error "midilib: macOS, Windows or Linux"
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -143,7 +144,11 @@ public:
     }
     slots_[head & mask_] = m;
     head_.store(head + 1, std::memory_order_release);
-    if (waiting_.load(std::memory_order_acquire)) {
+    // A store then a load on each side (here head_ then waiting_, in wait()
+    // waiting_ then head_): the fences keep both from reading the other's
+    // old value, which would leave a reader asleep on a message.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (waiting_.load(std::memory_order_relaxed)) {
       std::lock_guard<std::mutex> lock(mutex_);
       ready_.notify_one();
     }
@@ -162,7 +167,8 @@ public:
   bool wait(std::chrono::nanoseconds timeout) {
     if (front()) { return true; }
     std::unique_lock<std::mutex> lock(mutex_);
-    waiting_.store(true, std::memory_order_release);
+    waiting_.store(true, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
     bool any = ready_.wait_for(lock, timeout, [this] { return front() != nullptr; });
     waiting_.store(false, std::memory_order_release);
     return any;
@@ -343,6 +349,7 @@ inline int64_t now_ns() {
 // input of the same name.
 inline std::vector<std::pair<std::string, UINT>> named_inputs() {
   std::vector<std::pair<std::string, UINT>> out;
+  std::vector<std::string> names;  // as the devices give them
   UINT n = midiInGetNumDevs();
   for (UINT i = 0; i < n; i++) {
     MIDIINCAPSW caps;
@@ -350,10 +357,8 @@ inline std::vector<std::pair<std::string, UINT>> named_inputs() {
     char buf[MAXPNAMELEN * 4];
     int len = WideCharToMultiByte(CP_UTF8, 0, caps.szPname, -1, buf, sizeof buf, nullptr, nullptr);
     std::string name = len > 0 ? std::string(buf) : std::string();
-    int same = 0;
-    for (auto &[seen, k] : out) {
-      if (seen == name || seen.rfind(name + " (", 0) == 0) { same++; }
-    }
+    auto same = std::count(names.begin(), names.end(), name);
+    names.push_back(name);
     out.push_back({same ? name + " (" + std::to_string(same + 1) + ")" : name, i});
   }
   return out;
