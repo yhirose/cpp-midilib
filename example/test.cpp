@@ -7,6 +7,9 @@
 #include <cstdio>
 #include <functional>
 #include <optional>
+#include <spawn.h>
+#include <string>
+#include <sys/wait.h>
 #include <thread>
 
 static int failures = 0;
@@ -57,7 +60,38 @@ static std::vector<midilib::Message> take(midilib::Input &in, size_t n) {
   return got;
 }
 
-int main() {
+// A source in another process, made after this one first listed the inputs,
+// as a device plugged in once a program runs: it must be listed too. This
+// process makes no CoreMIDI client of its own before, which would keep it in
+// step with the sources whatever midilib does.
+static bool lists_a_source_made_later(const char *self) {
+  midilib::input_ports();
+  pid_t child;
+  char arg[] = "--late-source";
+  char *argv[] = {const_cast<char *>(self), arg, nullptr};
+  if (posix_spawn(&child, self, nullptr, nullptr, argv, nullptr) != 0) { return false; }
+  bool listed = wait_for([] {
+    for (auto &p : midilib::input_ports()) {
+      if (p.name == "midilib late source") { return true; }
+    }
+    return false;
+  });
+  kill(child, SIGTERM);
+  waitpid(child, nullptr, 0);
+  return listed;
+}
+
+int main(int argc, char **argv) {
+  if (argc > 1 && std::string(argv[1]) == "--late-source") {
+    MIDIClientRef c;
+    MIDIEndpointRef s;
+    MIDIClientCreateWithBlock(CFSTR("midilib late"), &c, ^(const MIDINotification *) {});
+    MIDISourceCreateWithProtocol(c, CFSTR("midilib late source"), kMIDIProtocol_1_0, &s);
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    return 0;
+  }
+  CHECK(lists_a_source_made_later(argv[0]));
+
   MIDIClientRef client;
   if (MIDIClientCreateWithBlock(CFSTR("midilib test"), &client, ^(const MIDINotification *) {}) != noErr ||
       MIDISourceCreateWithProtocol(client, CFSTR("midilib test source"), kMIDIProtocol_1_0, &source) != noErr) {

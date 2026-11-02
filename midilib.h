@@ -44,6 +44,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -223,13 +224,30 @@ inline void check(OSStatus err, const char *what) {
   }
 }
 
-// The one CoreMIDI client of the process, made when it is first needed. It
-// is never disposed: the system ends it with the process.
+// The one CoreMIDI client of the process, made when it is first needed. A
+// process learns of sources that come and go on the run loop of the thread
+// its client was made on, which a program's own thread may never run; so the
+// client is made on a thread of its own that runs its loop for good (a timer
+// far off keeps the loop from finding nothing to wait for). It is never
+// disposed: the system ends it with the process.
 inline MIDIClientRef client() {
   static const MIDIClientRef c = [] {
-    MIDIClientRef r = 0;
-    check(MIDIClientCreateWithBlock(CFSTR("midilib"), &r, ^(const MIDINotification *) {}),
-          "MIDIClientCreateWithBlock");
+    std::promise<MIDIClientRef> made;
+    auto got = made.get_future();
+    std::thread([made = std::move(made)]() mutable {
+      MIDIClientRef r = 0;
+      if (MIDIClientCreateWithBlock(CFSTR("midilib"), &r, ^(const MIDINotification *) {}) != noErr) {
+        made.set_value(0);
+        return;
+      }
+      made.set_value(r);
+      auto keep = CFRunLoopTimerCreateWithHandler(nullptr, CFAbsoluteTimeGetCurrent() + 1e9, 1e9, 0, 0,
+                                                  ^(CFRunLoopTimerRef) {});
+      CFRunLoopAddTimer(CFRunLoopGetCurrent(), keep, kCFRunLoopDefaultMode);
+      CFRunLoopRun();
+    }).detach();
+    auto r = got.get();
+    if (!r) { throw Error("midilib: MIDIClientCreateWithBlock failed"); }
     return r;
   }();
   return c;
@@ -261,7 +279,11 @@ inline void receive(const MIDIEventList *list, Queue &q) {
   }
 }
 
+// A process sees the sources come and go only once it has a client, so the
+// client comes first: a device plugged in after the program started is
+// listed too.
 inline std::vector<Port> ports() {
+  client();
   std::vector<Port> out;
   auto n = MIDIGetNumberOfSources();
   for (ItemCount i = 0; i < n; i++) {
