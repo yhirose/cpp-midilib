@@ -120,6 +120,11 @@ inline bool channel_message(uint8_t status, uint8_t d1, uint8_t d2, int64_t time
 // Messages from the MIDI thread (the one producer) to the thread that reads
 // them (the one consumer), without a lock. When it is full, what comes is
 // counted and dropped, and what is in it is kept. A reader may wait for one.
+// The two ends sit on cache lines of their own, which MSVC warns of (C4324).
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
 class Queue {
 public:
   explicit Queue(size_t capacity) {
@@ -174,6 +179,9 @@ private:
   std::mutex mutex_;
   std::condition_variable ready_;
 };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 #if defined(__APPLE__)
 
