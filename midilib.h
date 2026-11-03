@@ -25,8 +25,15 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
-#include <mmsystem.h>
+// The MIDI API alone: <mmsystem.h>, which a full <windows.h> takes too, would
+// also bring PlaySound and the rest of winmm as macros, which rename functions
+// of the same names elsewhere (raylib's).
+#include <mmsyscom.h>
+#include <mmeapi.h>
 #elif defined(__linux__)
 #include <dlfcn.h>
 #include <poll.h>

@@ -3,6 +3,12 @@
 // the ports (whatever there are) and a port that is not there.
 #include <midilib.h>
 
+// The Windows headers it takes are the MIDI ones alone: <mmsystem.h> would
+// bring PlaySound as a macro, which renames a library's own (raylib's).
+#if defined(PlaySound)
+#error "midilib.h brings in PlaySound"
+#endif
+
 #include <cstdio>
 #include <functional>
 
